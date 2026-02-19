@@ -30,6 +30,14 @@ func newJSONBackend(path string, backupRetention int) backend {
 	}
 }
 
+func (b *jsonBackend) EnsurePhase3Backfill() (bool, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	_, changed, err := b.loadBackfilledUnlocked()
+	return changed, err
+}
+
 func (b *jsonBackend) AddPatient(name, phone, email string) (model.Patient, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
@@ -233,7 +241,419 @@ func (b *jsonBackend) SearchPatients(query string) ([]model.Patient, error) {
 	return results, nil
 }
 
-func (b *jsonBackend) ScheduleAppointment(patientID string, at time.Time, reason string) (model.Appointment, error) {
+func (b *jsonBackend) AddProfessional(name, primaryRole, secondaryRole string) (model.Professional, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	data, err := b.loadUnlocked()
+	if err != nil {
+		return model.Professional{}, err
+	}
+
+	trimmedName := normalizeRoleOrKind(name)
+	if trimmedName == "" {
+		return model.Professional{}, errors.New("el nombre del profesional es obligatorio")
+	}
+	trimmedPrimaryRole := normalizeRoleOrKind(primaryRole)
+	if trimmedPrimaryRole == "" {
+		return model.Professional{}, errors.New("primary-role es obligatorio")
+	}
+	trimmedSecondaryRole := normalizeRoleOrKind(secondaryRole)
+
+	if dup := findDuplicateProfessional(data.Professionals, trimmedName, ""); dup != nil {
+		return model.Professional{}, fmt.Errorf("profesional duplicado: coincide con %q", dup.ID)
+	}
+
+	professional := model.Professional{
+		ID:            newID("pr"),
+		Name:          trimmedName,
+		PrimaryRole:   trimmedPrimaryRole,
+		SecondaryRole: trimmedSecondaryRole,
+		CreatedAt:     time.Now().UTC(),
+	}
+	data.Professionals = append(data.Professionals, professional)
+
+	if err := b.saveUnlocked(data); err != nil {
+		return model.Professional{}, err
+	}
+	return professional, nil
+}
+
+func (b *jsonBackend) ListProfessionals() ([]model.Professional, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	data, err := b.loadUnlocked()
+	if err != nil {
+		return nil, err
+	}
+
+	out := append([]model.Professional(nil), data.Professionals...)
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
+	return out, nil
+}
+
+func (b *jsonBackend) GetProfessionalByID(id string) (model.Professional, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	data, err := b.loadUnlocked()
+	if err != nil {
+		return model.Professional{}, err
+	}
+
+	target := strings.TrimSpace(id)
+	for _, professional := range data.Professionals {
+		if professional.ID == target {
+			return professional, nil
+		}
+	}
+
+	return model.Professional{}, fmt.Errorf("no se encontro el profesional con id %q", target)
+}
+
+func (b *jsonBackend) UpdateProfessional(id, name, primaryRole, secondaryRole string) (model.Professional, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	data, err := b.loadUnlocked()
+	if err != nil {
+		return model.Professional{}, err
+	}
+
+	target := strings.TrimSpace(id)
+	if target == "" {
+		return model.Professional{}, errors.New("id de profesional obligatorio")
+	}
+
+	idx := -1
+	for i := range data.Professionals {
+		if data.Professionals[i].ID == target {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return model.Professional{}, fmt.Errorf("no se encontro el profesional con id %q", target)
+	}
+
+	trimmedName := normalizeRoleOrKind(name)
+	trimmedPrimaryRole := normalizeRoleOrKind(primaryRole)
+	trimmedSecondaryRole := normalizeRoleOrKind(secondaryRole)
+
+	if trimmedName == "" && trimmedPrimaryRole == "" && trimmedSecondaryRole == "" {
+		return model.Professional{}, errors.New("debe proporcionar al menos un campo para actualizar")
+	}
+
+	updated := data.Professionals[idx]
+	if trimmedName != "" {
+		updated.Name = trimmedName
+	}
+	if trimmedPrimaryRole != "" {
+		updated.PrimaryRole = trimmedPrimaryRole
+	}
+	if trimmedSecondaryRole != "" {
+		updated.SecondaryRole = trimmedSecondaryRole
+	}
+
+	if strings.TrimSpace(updated.Name) == "" {
+		return model.Professional{}, errors.New("el nombre del profesional es obligatorio")
+	}
+	if strings.TrimSpace(updated.PrimaryRole) == "" {
+		return model.Professional{}, errors.New("primary-role es obligatorio")
+	}
+
+	if dup := findDuplicateProfessional(data.Professionals, updated.Name, updated.ID); dup != nil {
+		return model.Professional{}, fmt.Errorf("profesional duplicado: coincide con %q", dup.ID)
+	}
+
+	data.Professionals[idx] = updated
+	if err := b.saveUnlocked(data); err != nil {
+		return model.Professional{}, err
+	}
+	return updated, nil
+}
+
+func (b *jsonBackend) DeleteProfessional(id string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	data, err := b.loadUnlocked()
+	if err != nil {
+		return err
+	}
+
+	target := strings.TrimSpace(id)
+	if target == "" {
+		return errors.New("id de profesional obligatorio")
+	}
+	if target == defaultProfessionalID {
+		return errors.New("no se puede eliminar el profesional por defecto")
+	}
+
+	idx := -1
+	for i := range data.Professionals {
+		if data.Professionals[i].ID == target {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return fmt.Errorf("no se encontro el profesional con id %q", target)
+	}
+
+	for _, appt := range data.Appointments {
+		if appt.ProfessionalID == target && isActiveAppointmentStatus(appt.Status) {
+			return fmt.Errorf("no se puede eliminar el profesional %q porque tiene citas activas", target)
+		}
+	}
+
+	data.Professionals = append(data.Professionals[:idx], data.Professionals[idx+1:]...)
+	filteredAppointments := make([]model.Appointment, 0, len(data.Appointments))
+	for _, appt := range data.Appointments {
+		if appt.ProfessionalID != target {
+			filteredAppointments = append(filteredAppointments, appt)
+		}
+	}
+	data.Appointments = filteredAppointments
+	return b.saveUnlocked(data)
+}
+
+func (b *jsonBackend) SearchProfessionals(query string) ([]model.Professional, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	data, err := b.loadUnlocked()
+	if err != nil {
+		return nil, err
+	}
+
+	q := strings.ToLower(strings.TrimSpace(query))
+	results := make([]model.Professional, 0, len(data.Professionals))
+	for _, professional := range data.Professionals {
+		if q == "" {
+			results = append(results, professional)
+			continue
+		}
+
+		if strings.Contains(strings.ToLower(professional.Name), q) ||
+			strings.Contains(strings.ToLower(professional.PrimaryRole), q) ||
+			strings.Contains(strings.ToLower(professional.SecondaryRole), q) {
+			results = append(results, professional)
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].CreatedAt.Before(results[j].CreatedAt)
+	})
+	return results, nil
+}
+
+func (b *jsonBackend) AddService(name, kind string) (model.Service, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	data, err := b.loadUnlocked()
+	if err != nil {
+		return model.Service{}, err
+	}
+
+	trimmedName := normalizeRoleOrKind(name)
+	if trimmedName == "" {
+		return model.Service{}, errors.New("el nombre del servicio es obligatorio")
+	}
+	trimmedKind := normalizeRoleOrKind(kind)
+	if trimmedKind == "" {
+		return model.Service{}, errors.New("kind es obligatorio")
+	}
+
+	if dup := findDuplicateService(data.Services, trimmedName, ""); dup != nil {
+		return model.Service{}, fmt.Errorf("servicio duplicado: coincide con %q", dup.ID)
+	}
+
+	service := model.Service{
+		ID:        newID("sv"),
+		Name:      trimmedName,
+		Kind:      trimmedKind,
+		CreatedAt: time.Now().UTC(),
+	}
+	data.Services = append(data.Services, service)
+
+	if err := b.saveUnlocked(data); err != nil {
+		return model.Service{}, err
+	}
+	return service, nil
+}
+
+func (b *jsonBackend) ListServices() ([]model.Service, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	data, err := b.loadUnlocked()
+	if err != nil {
+		return nil, err
+	}
+
+	out := append([]model.Service(nil), data.Services...)
+	sort.Slice(out, func(i, j int) bool {
+		return out[i].CreatedAt.Before(out[j].CreatedAt)
+	})
+	return out, nil
+}
+
+func (b *jsonBackend) GetServiceByID(id string) (model.Service, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	data, err := b.loadUnlocked()
+	if err != nil {
+		return model.Service{}, err
+	}
+
+	target := strings.TrimSpace(id)
+	for _, service := range data.Services {
+		if service.ID == target {
+			return service, nil
+		}
+	}
+	return model.Service{}, fmt.Errorf("no se encontro el servicio con id %q", target)
+}
+
+func (b *jsonBackend) UpdateService(id, name, kind string) (model.Service, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	data, err := b.loadUnlocked()
+	if err != nil {
+		return model.Service{}, err
+	}
+
+	target := strings.TrimSpace(id)
+	if target == "" {
+		return model.Service{}, errors.New("id de servicio obligatorio")
+	}
+
+	idx := -1
+	for i := range data.Services {
+		if data.Services[i].ID == target {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return model.Service{}, fmt.Errorf("no se encontro el servicio con id %q", target)
+	}
+
+	trimmedName := normalizeRoleOrKind(name)
+	trimmedKind := normalizeRoleOrKind(kind)
+
+	if trimmedName == "" && trimmedKind == "" {
+		return model.Service{}, errors.New("debe proporcionar al menos un campo para actualizar")
+	}
+
+	updated := data.Services[idx]
+	if trimmedName != "" {
+		updated.Name = trimmedName
+	}
+	if trimmedKind != "" {
+		updated.Kind = trimmedKind
+	}
+
+	if strings.TrimSpace(updated.Name) == "" {
+		return model.Service{}, errors.New("el nombre del servicio es obligatorio")
+	}
+	if strings.TrimSpace(updated.Kind) == "" {
+		return model.Service{}, errors.New("kind es obligatorio")
+	}
+
+	if dup := findDuplicateService(data.Services, updated.Name, updated.ID); dup != nil {
+		return model.Service{}, fmt.Errorf("servicio duplicado: coincide con %q", dup.ID)
+	}
+
+	data.Services[idx] = updated
+	if err := b.saveUnlocked(data); err != nil {
+		return model.Service{}, err
+	}
+	return updated, nil
+}
+
+func (b *jsonBackend) DeleteService(id string) error {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	data, err := b.loadUnlocked()
+	if err != nil {
+		return err
+	}
+
+	target := strings.TrimSpace(id)
+	if target == "" {
+		return errors.New("id de servicio obligatorio")
+	}
+	if target == defaultServiceID {
+		return errors.New("no se puede eliminar el servicio por defecto")
+	}
+
+	idx := -1
+	for i := range data.Services {
+		if data.Services[i].ID == target {
+			idx = i
+			break
+		}
+	}
+	if idx == -1 {
+		return fmt.Errorf("no se encontro el servicio con id %q", target)
+	}
+
+	for _, appt := range data.Appointments {
+		if appt.ServiceID == target && isActiveAppointmentStatus(appt.Status) {
+			return fmt.Errorf("no se puede eliminar el servicio %q porque tiene citas activas", target)
+		}
+	}
+
+	data.Services = append(data.Services[:idx], data.Services[idx+1:]...)
+	filteredAppointments := make([]model.Appointment, 0, len(data.Appointments))
+	for _, appt := range data.Appointments {
+		if appt.ServiceID != target {
+			filteredAppointments = append(filteredAppointments, appt)
+		}
+	}
+	data.Appointments = filteredAppointments
+	return b.saveUnlocked(data)
+}
+
+func (b *jsonBackend) SearchServices(query string) ([]model.Service, error) {
+	b.mu.Lock()
+	defer b.mu.Unlock()
+
+	data, err := b.loadUnlocked()
+	if err != nil {
+		return nil, err
+	}
+
+	q := strings.ToLower(strings.TrimSpace(query))
+	results := make([]model.Service, 0, len(data.Services))
+	for _, service := range data.Services {
+		if q == "" {
+			results = append(results, service)
+			continue
+		}
+
+		if strings.Contains(strings.ToLower(service.Name), q) ||
+			strings.Contains(strings.ToLower(service.Kind), q) {
+			results = append(results, service)
+		}
+	}
+
+	sort.Slice(results, func(i, j int) bool {
+		return results[i].CreatedAt.Before(results[j].CreatedAt)
+	})
+	return results, nil
+}
+
+func (b *jsonBackend) ScheduleAppointment(patientID, professionalID, serviceID string, at time.Time, reason string) (model.Appointment, error) {
 	b.mu.Lock()
 	defer b.mu.Unlock()
 
@@ -243,8 +663,27 @@ func (b *jsonBackend) ScheduleAppointment(patientID string, at time.Time, reason
 	}
 
 	trimmedPatientID := strings.TrimSpace(patientID)
+	if trimmedPatientID == "" {
+		return model.Appointment{}, errors.New("patient-id es obligatorio")
+	}
 	if !existsPatient(data.Patients, trimmedPatientID) {
 		return model.Appointment{}, fmt.Errorf("no existe el paciente con id %q", trimmedPatientID)
+	}
+
+	trimmedProfessionalID := strings.TrimSpace(professionalID)
+	if trimmedProfessionalID == "" {
+		return model.Appointment{}, errors.New("professional-id es obligatorio")
+	}
+	if !existsProfessional(data.Professionals, trimmedProfessionalID) {
+		return model.Appointment{}, fmt.Errorf("no existe el profesional con id %q", trimmedProfessionalID)
+	}
+
+	trimmedServiceID := strings.TrimSpace(serviceID)
+	if trimmedServiceID == "" {
+		return model.Appointment{}, errors.New("service-id es obligatorio")
+	}
+	if !existsService(data.Services, trimmedServiceID) {
+		return model.Appointment{}, fmt.Errorf("no existe el servicio con id %q", trimmedServiceID)
 	}
 
 	trimmedReason, err := validateRequiredReason(reason)
@@ -257,17 +696,19 @@ func (b *jsonBackend) ScheduleAppointment(patientID string, at time.Time, reason
 		return model.Appointment{}, err
 	}
 
-	if hasAppointmentConflict(data.Appointments, normalized, "") {
-		return model.Appointment{}, errors.New("ya existe una cita en ese horario")
+	if hasAppointmentConflict(data.Appointments, normalized, trimmedProfessionalID, trimmedServiceID, "") {
+		return model.Appointment{}, errors.New("ya existe una cita en conflicto para ese profesional o servicio")
 	}
 
 	appointment := model.Appointment{
-		ID:        newID("a"),
-		PatientID: trimmedPatientID,
-		DateTime:  normalized,
-		Reason:    trimmedReason,
-		Status:    model.AppointmentStatusScheduled,
-		CreatedAt: time.Now().UTC(),
+		ID:             newID("a"),
+		PatientID:      trimmedPatientID,
+		ProfessionalID: trimmedProfessionalID,
+		ServiceID:      trimmedServiceID,
+		DateTime:       normalized,
+		Reason:         trimmedReason,
+		Status:         model.AppointmentStatusScheduled,
+		CreatedAt:      time.Now().UTC(),
 	}
 	data.Appointments = append(data.Appointments, appointment)
 
@@ -311,8 +752,14 @@ func (b *jsonBackend) RescheduleAppointment(id string, at time.Time) (model.Appo
 		return model.Appointment{}, fmt.Errorf("no se puede reprogramar una cita en estado %q", data.Appointments[idx].Status)
 	}
 
-	if hasAppointmentConflict(data.Appointments, normalized, target) {
-		return model.Appointment{}, errors.New("ya existe una cita en ese horario")
+	if hasAppointmentConflict(
+		data.Appointments,
+		normalized,
+		data.Appointments[idx].ProfessionalID,
+		data.Appointments[idx].ServiceID,
+		target,
+	) {
+		return model.Appointment{}, errors.New("ya existe una cita en conflicto para ese profesional o servicio")
 	}
 
 	data.Appointments[idx].DateTime = normalized
@@ -333,6 +780,8 @@ func (b *jsonBackend) ListAppointments(filters AppointmentFilters) ([]model.Appo
 	}
 
 	trimmedPatientID := strings.TrimSpace(filters.PatientID)
+	trimmedProfessionalID := strings.TrimSpace(filters.ProfessionalID)
+	trimmedServiceID := strings.TrimSpace(filters.ServiceID)
 	trimmedStatus := strings.ToLower(strings.TrimSpace(filters.Status))
 
 	var fromUTC *time.Time
@@ -353,6 +802,12 @@ func (b *jsonBackend) ListAppointments(filters AppointmentFilters) ([]model.Appo
 			continue
 		}
 		if trimmedPatientID != "" && appt.PatientID != trimmedPatientID {
+			continue
+		}
+		if trimmedProfessionalID != "" && appt.ProfessionalID != trimmedProfessionalID {
+			continue
+		}
+		if trimmedServiceID != "" && appt.ServiceID != trimmedServiceID {
 			continue
 		}
 		if trimmedStatus != "" && strings.ToLower(appt.Status) != trimmedStatus {
@@ -432,7 +887,31 @@ func existsPatient(patients []model.Patient, id string) bool {
 	return false
 }
 
-func hasAppointmentConflict(appointments []model.Appointment, at time.Time, excludedID string) bool {
+func existsProfessional(professionals []model.Professional, id string) bool {
+	for _, professional := range professionals {
+		if professional.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func existsService(services []model.Service, id string) bool {
+	for _, service := range services {
+		if service.ID == id {
+			return true
+		}
+	}
+	return false
+}
+
+func hasAppointmentConflict(
+	appointments []model.Appointment,
+	at time.Time,
+	professionalID string,
+	serviceID string,
+	excludedID string,
+) bool {
 	for _, appt := range appointments {
 		if appt.ID == excludedID {
 			continue
@@ -440,7 +919,10 @@ func hasAppointmentConflict(appointments []model.Appointment, at time.Time, excl
 		if !isActiveAppointmentStatus(appt.Status) {
 			continue
 		}
-		if appt.DateTime.UTC().Truncate(time.Minute).Equal(at) {
+		if !appt.DateTime.UTC().Truncate(time.Minute).Equal(at) {
+			continue
+		}
+		if appt.ProfessionalID == professionalID || appt.ServiceID == serviceID {
 			return true
 		}
 	}
@@ -473,24 +955,71 @@ func findDuplicatePatient(patients []model.Patient, email, phone, excludeID stri
 	return nil
 }
 
+func findDuplicateProfessional(professionals []model.Professional, name, excludeID string) *model.Professional {
+	normName := normalizeNameKey(name)
+	if normName == "" {
+		return nil
+	}
+
+	for i := range professionals {
+		if professionals[i].ID == excludeID {
+			continue
+		}
+		if normalizeNameKey(professionals[i].Name) == normName {
+			return &professionals[i]
+		}
+	}
+	return nil
+}
+
+func findDuplicateService(services []model.Service, name, excludeID string) *model.Service {
+	normName := normalizeNameKey(name)
+	if normName == "" {
+		return nil
+	}
+
+	for i := range services {
+		if services[i].ID == excludeID {
+			continue
+		}
+		if normalizeNameKey(services[i].Name) == normName {
+			return &services[i]
+		}
+	}
+	return nil
+}
+
 func (b *jsonBackend) loadUnlocked() (model.Data, error) {
+	data, _, err := b.loadBackfilledUnlocked()
+	return data, err
+}
+
+func (b *jsonBackend) loadBackfilledUnlocked() (model.Data, bool, error) {
 	bytes, err := os.ReadFile(b.path)
 	if err != nil {
 		if errors.Is(err, os.ErrNotExist) {
-			return model.Data{}, nil
+			data := model.Data{}
+			changed := ensurePhase3BackfillData(&data)
+			return data, changed, nil
 		}
-		return model.Data{}, fmt.Errorf("no se pudo leer %s: %w", b.path, err)
+		return model.Data{}, false, fmt.Errorf("no se pudo leer %s: %w", b.path, err)
 	}
 
-	if len(strings.TrimSpace(string(bytes))) == 0 {
-		return model.Data{}, nil
+	data := model.Data{}
+	if len(strings.TrimSpace(string(bytes))) != 0 {
+		if err := json.Unmarshal(bytes, &data); err != nil {
+			return model.Data{}, false, fmt.Errorf("JSON invalido en %s: %w", b.path, err)
+		}
 	}
 
-	var data model.Data
-	if err := json.Unmarshal(bytes, &data); err != nil {
-		return model.Data{}, fmt.Errorf("JSON invalido en %s: %w", b.path, err)
+	changed := ensurePhase3BackfillData(&data)
+	if changed {
+		if err := b.saveUnlocked(data); err != nil {
+			return model.Data{}, false, err
+		}
 	}
-	return data, nil
+
+	return data, changed, nil
 }
 
 func (b *jsonBackend) saveUnlocked(data model.Data) error {

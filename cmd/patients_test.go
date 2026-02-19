@@ -62,9 +62,27 @@ func TestPatientsDeleteBlockedByActiveAppointments(t *testing.T) {
 		t.Fatalf("unexpected add error: %v, output: %s", err, output)
 	}
 	patientID := mustExtractPatientID(t, output)
+	professionalID := mustCreateProfessional(t, cacheDir, dataFile)
+	serviceID := mustCreateService(t, cacheDir, dataFile)
 
 	at := time.Now().Add(2 * time.Hour).Format("2006-01-02 15:04")
-	output, err = runAgendaCLI(t, cacheDir, dataFile, "appointments", "add", "--patient-id", patientID, "--at", at, "--reason", "Control")
+	output, err = runAgendaCLI(
+		t,
+		cacheDir,
+		dataFile,
+		"appointments",
+		"add",
+		"--patient-id",
+		patientID,
+		"--professional-id",
+		professionalID,
+		"--service-id",
+		serviceID,
+		"--at",
+		at,
+		"--reason",
+		"Control",
+	)
 	if err != nil {
 		t.Fatalf("unexpected appointment add error: %v, output: %s", err, output)
 	}

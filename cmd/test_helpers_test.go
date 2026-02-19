@@ -62,3 +62,63 @@ func mustExtractAppointmentID(t *testing.T, output string) string {
 	}
 	return strings.TrimSpace(match[1])
 }
+
+func mustExtractProfessionalID(t *testing.T, output string) string {
+	t.Helper()
+	re := regexp.MustCompile(`\((pr_[^)]+)\)`)
+	match := re.FindStringSubmatch(output)
+	if len(match) != 2 {
+		t.Fatalf("could not parse professional id from output: %s", output)
+	}
+	return strings.TrimSpace(match[1])
+}
+
+func mustExtractServiceID(t *testing.T, output string) string {
+	t.Helper()
+	re := regexp.MustCompile(`\((sv_[^)]+)\)`)
+	match := re.FindStringSubmatch(output)
+	if len(match) != 2 {
+		t.Fatalf("could not parse service id from output: %s", output)
+	}
+	return strings.TrimSpace(match[1])
+}
+
+func mustCreateProfessional(t *testing.T, cacheDir, dataFile string) string {
+	t.Helper()
+	output, err := runAgendaCLI(
+		t,
+		cacheDir,
+		dataFile,
+		"professionals",
+		"add",
+		"--name",
+		"Profesional Test",
+		"--primary-role",
+		"medico",
+		"--secondary-role",
+		"general",
+	)
+	if err != nil {
+		t.Fatalf("unexpected add professional error: %v, output: %s", err, output)
+	}
+	return mustExtractProfessionalID(t, output)
+}
+
+func mustCreateService(t *testing.T, cacheDir, dataFile string) string {
+	t.Helper()
+	output, err := runAgendaCLI(
+		t,
+		cacheDir,
+		dataFile,
+		"services",
+		"add",
+		"--name",
+		"Servicio Test",
+		"--kind",
+		"consultorio",
+	)
+	if err != nil {
+		t.Fatalf("unexpected add service error: %v, output: %s", err, output)
+	}
+	return mustExtractServiceID(t, output)
+}

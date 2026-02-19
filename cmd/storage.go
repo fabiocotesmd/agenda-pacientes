@@ -42,7 +42,9 @@ func newStorageMigrateCmd() *cobra.Command {
 
 			fmt.Fprintf(
 				cmd.OutOrStdout(),
-				"Migracion completada | pacientes: %d | citas: %d | destino: %s\n",
+				"Migracion completada | profesionales: %d | servicios: %d | pacientes: %d | citas: %d | destino: %s\n",
+				result.Professionals,
+				result.Services,
 				result.Patients,
 				result.Appointments,
 				toSQLite,

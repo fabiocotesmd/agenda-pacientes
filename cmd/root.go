@@ -51,6 +51,8 @@ func init() {
 	rootCmd.SilenceUsage = true
 
 	rootCmd.AddCommand(newPatientsCmd())
+	rootCmd.AddCommand(newProfessionalsCmd())
+	rootCmd.AddCommand(newServicesCmd())
 	rootCmd.AddCommand(newAppointmentsCmd())
 	rootCmd.AddCommand(newStorageCmd())
 
@@ -58,7 +60,7 @@ func init() {
 		Use:   "version",
 		Short: "Muestra la version de la aplicacion",
 		Run: func(cmd *cobra.Command, args []string) {
-			fmt.Fprintln(cmd.OutOrStdout(), "agenda v2.0.0")
+			fmt.Fprintln(cmd.OutOrStdout(), "agenda v3.0.0")
 		},
 	})
 }

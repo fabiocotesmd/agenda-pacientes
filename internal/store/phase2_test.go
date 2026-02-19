@@ -18,7 +18,7 @@ func TestSetAppointmentStatusTransitions(t *testing.T) {
 		t.Fatalf("unexpected add patient error: %v", err)
 	}
 
-	appt, err := s.ScheduleAppointment(patient.ID, time.Now().Add(2*time.Hour), "Control")
+	appt, err := s.ScheduleAppointment(patient.ID, defaultProfessionalID, defaultServiceID, time.Now().Add(2*time.Hour), "Control")
 	if err != nil {
 		t.Fatalf("unexpected schedule error: %v", err)
 	}
@@ -49,7 +49,7 @@ func TestTerminalStatusBlocksRescheduleAndCancel(t *testing.T) {
 	s := New(t.TempDir() + "/agenda.json")
 
 	patient, _ := s.AddPatient("Terminal Test", "555-1002", "terminal@test.com")
-	appt, err := s.ScheduleAppointment(patient.ID, time.Now().Add(2*time.Hour), "Control")
+	appt, err := s.ScheduleAppointment(patient.ID, defaultProfessionalID, defaultServiceID, time.Now().Add(2*time.Hour), "Control")
 	if err != nil {
 		t.Fatalf("unexpected schedule error: %v", err)
 	}
@@ -155,7 +155,7 @@ func TestMigrateJSONToSQLite(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected add patient error: %v", err)
 	}
-	_, err = jsonStore.ScheduleAppointment(patient.ID, time.Now().Add(2*time.Hour), "Control")
+	_, err = jsonStore.ScheduleAppointment(patient.ID, defaultProfessionalID, defaultServiceID, time.Now().Add(2*time.Hour), "Control")
 	if err != nil {
 		t.Fatalf("unexpected add appointment error: %v", err)
 	}
@@ -227,7 +227,7 @@ func TestSetStatusNoOpDoesNotCreateAuditEvent(t *testing.T) {
 	if err != nil {
 		t.Fatalf("unexpected add patient error: %v", err)
 	}
-	appt, err := s.ScheduleAppointment(patient.ID, time.Now().Add(2*time.Hour), "Control")
+	appt, err := s.ScheduleAppointment(patient.ID, defaultProfessionalID, defaultServiceID, time.Now().Add(2*time.Hour), "Control")
 	if err != nil {
 		t.Fatalf("unexpected add appointment error: %v", err)
 	}

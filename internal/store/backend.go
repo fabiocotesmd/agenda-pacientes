@@ -10,6 +10,17 @@ import (
 	"agenda-pacientes/internal/model"
 )
 
+const (
+	defaultProfessionalID            = "pr_general"
+	defaultProfessionalName          = "General"
+	defaultProfessionalPrimaryRole   = "medico"
+	defaultProfessionalSecondaryRole = "general"
+	defaultServiceID                 = "sv_general"
+	defaultServiceName               = "General"
+	defaultServiceKind               = "consultorio"
+	systemMigrationActor             = "system:migration"
+)
+
 var errNoStatusChange = errors.New("sin cambio de estado")
 
 type backend interface {
@@ -19,10 +30,29 @@ type backend interface {
 	UpdatePatient(id, name, phone, email string) (model.Patient, error)
 	DeletePatient(id string) error
 	SearchPatients(query string) ([]model.Patient, error)
-	ScheduleAppointment(patientID string, at time.Time, reason string) (model.Appointment, error)
+
+	AddProfessional(name, primaryRole, secondaryRole string) (model.Professional, error)
+	ListProfessionals() ([]model.Professional, error)
+	GetProfessionalByID(id string) (model.Professional, error)
+	UpdateProfessional(id, name, primaryRole, secondaryRole string) (model.Professional, error)
+	DeleteProfessional(id string) error
+	SearchProfessionals(query string) ([]model.Professional, error)
+
+	AddService(name, kind string) (model.Service, error)
+	ListServices() ([]model.Service, error)
+	GetServiceByID(id string) (model.Service, error)
+	UpdateService(id, name, kind string) (model.Service, error)
+	DeleteService(id string) error
+	SearchServices(query string) ([]model.Service, error)
+
+	ScheduleAppointment(patientID, professionalID, serviceID string, at time.Time, reason string) (model.Appointment, error)
 	RescheduleAppointment(id string, at time.Time) (model.Appointment, error)
 	ListAppointments(filters AppointmentFilters) ([]model.Appointment, error)
 	SetAppointmentStatus(id, status string) (model.Appointment, error)
+}
+
+type phase3BackfillEnsurer interface {
+	EnsurePhase3Backfill() (bool, error)
 }
 
 func validateRequiredReason(reason string) (string, error) {
@@ -63,6 +93,14 @@ func normalizePhoneDigits(value string) string {
 		}
 	}
 	return b.String()
+}
+
+func normalizeNameKey(value string) string {
+	return strings.Join(strings.Fields(strings.ToLower(strings.TrimSpace(value))), " ")
+}
+
+func normalizeRoleOrKind(value string) string {
+	return strings.Join(strings.Fields(strings.TrimSpace(value)), " ")
 }
 
 func validateStatus(status string) (string, error) {
@@ -123,4 +161,83 @@ func canRescheduleStatus(status string) bool {
 
 func newID(prefix string) string {
 	return fmt.Sprintf("%s_%x", prefix, time.Now().UTC().UnixNano())
+}
+
+func defaultProfessional() model.Professional {
+	return model.Professional{
+		ID:            defaultProfessionalID,
+		Name:          defaultProfessionalName,
+		PrimaryRole:   defaultProfessionalPrimaryRole,
+		SecondaryRole: defaultProfessionalSecondaryRole,
+		CreatedAt:     time.Now().UTC(),
+	}
+}
+
+func defaultService() model.Service {
+	return model.Service{
+		ID:        defaultServiceID,
+		Name:      defaultServiceName,
+		Kind:      defaultServiceKind,
+		CreatedAt: time.Now().UTC(),
+	}
+}
+
+func ensurePhase3BackfillData(data *model.Data) bool {
+	if data == nil {
+		return false
+	}
+
+	changed := false
+
+	professionalExists := map[string]struct{}{}
+	for _, p := range data.Professionals {
+		id := strings.TrimSpace(p.ID)
+		if id == "" {
+			continue
+		}
+		professionalExists[id] = struct{}{}
+	}
+	if _, ok := professionalExists[defaultProfessionalID]; !ok {
+		p := defaultProfessional()
+		data.Professionals = append(data.Professionals, p)
+		professionalExists[p.ID] = struct{}{}
+		changed = true
+	}
+
+	serviceExists := map[string]struct{}{}
+	for _, s := range data.Services {
+		id := strings.TrimSpace(s.ID)
+		if id == "" {
+			continue
+		}
+		serviceExists[id] = struct{}{}
+	}
+	if _, ok := serviceExists[defaultServiceID]; !ok {
+		s := defaultService()
+		data.Services = append(data.Services, s)
+		serviceExists[s.ID] = struct{}{}
+		changed = true
+	}
+
+	for i := range data.Appointments {
+		currentProfessionalID := strings.TrimSpace(data.Appointments[i].ProfessionalID)
+		if currentProfessionalID == "" {
+			data.Appointments[i].ProfessionalID = defaultProfessionalID
+			changed = true
+		} else if _, ok := professionalExists[currentProfessionalID]; !ok {
+			data.Appointments[i].ProfessionalID = defaultProfessionalID
+			changed = true
+		}
+
+		currentServiceID := strings.TrimSpace(data.Appointments[i].ServiceID)
+		if currentServiceID == "" {
+			data.Appointments[i].ServiceID = defaultServiceID
+			changed = true
+		} else if _, ok := serviceExists[currentServiceID]; !ok {
+			data.Appointments[i].ServiceID = defaultServiceID
+			changed = true
+		}
+	}
+
+	return changed
 }

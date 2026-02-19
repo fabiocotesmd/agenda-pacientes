@@ -32,9 +32,11 @@ func newAppointmentsCmd() *cobra.Command {
 
 func newAppointmentsAddCmd() *cobra.Command {
 	var patientID string
+	var professionalID string
+	var serviceID string
 	var at string
 	var reason string
-	var useQuestionnaire bool
+	var useForm bool
 
 	cmd := &cobra.Command{
 		Use:   "add",
@@ -44,22 +46,32 @@ func newAppointmentsAddCmd() *cobra.Command {
 				return err
 			}
 
-			if useQuestionnaire {
-				answers, err := collectQuestionnaireAnswers(cmd, appointmentAddForm(), questionnaire.Answers{
-					"patient-id": strings.TrimSpace(patientID),
-					"at":         strings.TrimSpace(at),
-					"reason":     strings.TrimSpace(reason),
+			if useForm {
+				answers, err := collectFormAnswers(cmd, appointmentAddForm(), questionnaire.Answers{
+					"patient-id":      strings.TrimSpace(patientID),
+					"professional-id": strings.TrimSpace(professionalID),
+					"service-id":      strings.TrimSpace(serviceID),
+					"at":              strings.TrimSpace(at),
+					"reason":          strings.TrimSpace(reason),
 				})
 				if err != nil {
 					return err
 				}
 				patientID = answers["patient-id"]
+				professionalID = answers["professional-id"]
+				serviceID = answers["service-id"]
 				at = answers["at"]
 				reason = answers["reason"]
 			}
 
 			if strings.TrimSpace(patientID) == "" {
 				return fmt.Errorf("falta flag requerida: --patient-id")
+			}
+			if strings.TrimSpace(professionalID) == "" {
+				return fmt.Errorf("falta flag requerida: --professional-id")
+			}
+			if strings.TrimSpace(serviceID) == "" {
+				return fmt.Errorf("falta flag requerida: --service-id")
 			}
 			if strings.TrimSpace(at) == "" {
 				return fmt.Errorf("falta flag requerida: --at")
@@ -73,16 +85,18 @@ func newAppointmentsAddCmd() *cobra.Command {
 				return err
 			}
 
-			appt, err := appStore.ScheduleAppointment(patientID, dateTime, reason)
+			appt, err := appStore.ScheduleAppointment(patientID, professionalID, serviceID, dateTime, reason)
 			if err != nil {
 				return err
 			}
 
 			fmt.Fprintf(
 				cmd.OutOrStdout(),
-				"Cita creada: %s | paciente: %s | fecha: %s\n",
+				"Cita creada: %s | paciente: %s | profesional: %s | servicio: %s | fecha: %s\n",
 				appt.ID,
 				appt.PatientID,
+				appt.ProfessionalID,
+				appt.ServiceID,
 				appt.DateTime.Format("2006-01-02 15:04"),
 			)
 			return nil
@@ -90,9 +104,11 @@ func newAppointmentsAddCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&patientID, "patient-id", "", "ID del paciente")
+	cmd.Flags().StringVar(&professionalID, "professional-id", "", "ID del profesional")
+	cmd.Flags().StringVar(&serviceID, "service-id", "", "ID del servicio")
 	cmd.Flags().StringVar(&at, "at", "", "Fecha y hora (YYYY-MM-DD HH:MM o RFC3339)")
 	cmd.Flags().StringVar(&reason, "reason", "", "Motivo de la consulta")
-	addQuestionnaireFlags(cmd, &useQuestionnaire)
+	addFormFlags(cmd, &useForm)
 
 	return cmd
 }
@@ -102,6 +118,8 @@ func newAppointmentsListCmd() *cobra.Command {
 	var fromValue string
 	var toValue string
 	var patientID string
+	var professionalID string
+	var serviceID string
 	var status string
 
 	cmd := &cobra.Command{
@@ -135,6 +153,8 @@ func newAppointmentsListCmd() *cobra.Command {
 				From:            fromPtr,
 				To:              toPtr,
 				PatientID:       patientID,
+				ProfessionalID:  professionalID,
+				ServiceID:       serviceID,
 				Status:          status,
 			}
 
@@ -152,9 +172,11 @@ func newAppointmentsListCmd() *cobra.Command {
 			for _, a := range appointments {
 				fmt.Fprintf(
 					cmd.OutOrStdout(),
-					"- %s | paciente: %s | fecha: %s | estado: %s | motivo: %s\n",
+					"- %s | paciente: %s | profesional: %s | servicio: %s | fecha: %s | estado: %s | motivo: %s\n",
 					a.ID,
 					a.PatientID,
+					a.ProfessionalID,
+					a.ServiceID,
 					a.DateTime.Format("2006-01-02 15:04"),
 					a.Status,
 					blankIfEmpty(a.Reason),
@@ -168,6 +190,8 @@ func newAppointmentsListCmd() *cobra.Command {
 	cmd.Flags().StringVar(&fromValue, "from", "", "Fecha/hora minima (inclusiva)")
 	cmd.Flags().StringVar(&toValue, "to", "", "Fecha/hora maxima (inclusiva)")
 	cmd.Flags().StringVar(&patientID, "patient-id", "", "Filtrar por ID de paciente")
+	cmd.Flags().StringVar(&professionalID, "professional-id", "", "Filtrar por ID de profesional")
+	cmd.Flags().StringVar(&serviceID, "service-id", "", "Filtrar por ID de servicio")
 	cmd.Flags().StringVar(&status, "status", "", "Filtrar por estado de cita")
 
 	return cmd
@@ -175,7 +199,7 @@ func newAppointmentsListCmd() *cobra.Command {
 
 func newAppointmentsCancelCmd() *cobra.Command {
 	var appointmentID string
-	var useQuestionnaire bool
+	var useForm bool
 
 	cmd := &cobra.Command{
 		Use:   "cancel",
@@ -185,8 +209,8 @@ func newAppointmentsCancelCmd() *cobra.Command {
 				return err
 			}
 
-			if useQuestionnaire {
-				answers, err := collectQuestionnaireAnswers(cmd, appointmentCancelForm(), questionnaire.Answers{
+			if useForm {
+				answers, err := collectFormAnswers(cmd, appointmentCancelForm(), questionnaire.Answers{
 					"id": strings.TrimSpace(appointmentID),
 				})
 				if err != nil {
@@ -208,14 +232,14 @@ func newAppointmentsCancelCmd() *cobra.Command {
 	}
 
 	cmd.Flags().StringVar(&appointmentID, "id", "", "ID de la cita")
-	addQuestionnaireFlags(cmd, &useQuestionnaire)
+	addFormFlags(cmd, &useForm)
 	return cmd
 }
 
 func newAppointmentsRescheduleCmd() *cobra.Command {
 	var appointmentID string
 	var at string
-	var useQuestionnaire bool
+	var useForm bool
 
 	cmd := &cobra.Command{
 		Use:   "reschedule",
@@ -225,8 +249,8 @@ func newAppointmentsRescheduleCmd() *cobra.Command {
 				return err
 			}
 
-			if useQuestionnaire {
-				answers, err := collectQuestionnaireAnswers(cmd, appointmentRescheduleForm(), questionnaire.Answers{
+			if useForm {
+				answers, err := collectFormAnswers(cmd, appointmentRescheduleForm(), questionnaire.Answers{
 					"id": strings.TrimSpace(appointmentID),
 					"at": strings.TrimSpace(at),
 				})
@@ -256,9 +280,11 @@ func newAppointmentsRescheduleCmd() *cobra.Command {
 
 			fmt.Fprintf(
 				cmd.OutOrStdout(),
-				"Cita reprogramada: %s | paciente: %s | nueva fecha: %s\n",
+				"Cita reprogramada: %s | paciente: %s | profesional: %s | servicio: %s | nueva fecha: %s\n",
 				appt.ID,
 				appt.PatientID,
+				appt.ProfessionalID,
+				appt.ServiceID,
 				appt.DateTime.Format("2006-01-02 15:04"),
 			)
 			return nil
@@ -267,7 +293,7 @@ func newAppointmentsRescheduleCmd() *cobra.Command {
 
 	cmd.Flags().StringVar(&appointmentID, "id", "", "ID de la cita")
 	cmd.Flags().StringVar(&at, "at", "", "Nueva fecha y hora (YYYY-MM-DD HH:MM o RFC3339)")
-	addQuestionnaireFlags(cmd, &useQuestionnaire)
+	addFormFlags(cmd, &useForm)
 
 	return cmd
 }
@@ -313,9 +339,9 @@ func newAppointmentsSetStatusCmd() *cobra.Command {
 	return cmd
 }
 
-func addQuestionnaireFlags(cmd *cobra.Command, enabled *bool) {
-	cmd.Flags().BoolVar(enabled, "questionnaire", false, "Habilita captura interactiva de campos")
-	cmd.Flags().BoolVar(enabled, "q", false, "Alias corto de --questionnaire")
+func addFormFlags(cmd *cobra.Command, enabled *bool) {
+	cmd.Flags().BoolVar(enabled, "form", false, "Habilita captura interactiva de campos")
+	cmd.Flags().BoolVar(enabled, "f", false, "Alias corto de --form")
 }
 
 func appointmentAddForm() questionnaire.FormSpec {
@@ -325,6 +351,18 @@ func appointmentAddForm() questionnaire.FormSpec {
 			{
 				Name:     "patient-id",
 				Label:    "ID del paciente",
+				Required: true,
+				Type:     questionnaire.FieldTypeID,
+			},
+			{
+				Name:     "professional-id",
+				Label:    "ID del profesional",
+				Required: true,
+				Type:     questionnaire.FieldTypeID,
+			},
+			{
+				Name:     "service-id",
+				Label:    "ID del servicio",
 				Required: true,
 				Type:     questionnaire.FieldTypeID,
 			},
@@ -388,7 +426,7 @@ func appointmentCancelForm() questionnaire.FormSpec {
 	}
 }
 
-func collectQuestionnaireAnswers(cmd *cobra.Command, form questionnaire.FormSpec, preset questionnaire.Answers) (questionnaire.Answers, error) {
+func collectFormAnswers(cmd *cobra.Command, form questionnaire.FormSpec, preset questionnaire.Answers) (questionnaire.Answers, error) {
 	for k, v := range preset {
 		if strings.TrimSpace(v) == "" {
 			delete(preset, k)
@@ -403,7 +441,7 @@ func collectQuestionnaireAnswers(cmd *cobra.Command, form questionnaire.FormSpec
 	answers, err := engine.Collect(context.Background(), form, preset)
 	if err != nil {
 		if errors.Is(err, questionnaire.ErrCanceled) {
-			return nil, fmt.Errorf("cuestionario cancelado")
+			return nil, fmt.Errorf("formulario cancelado")
 		}
 		return nil, err
 	}

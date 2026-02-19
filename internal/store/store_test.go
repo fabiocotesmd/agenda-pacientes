@@ -17,6 +17,11 @@ func futureTime(base time.Time, deltaMinutes int) time.Time {
 	return base.Add(time.Duration(deltaMinutes) * time.Minute)
 }
 
+func scheduleTestAppointment(t *testing.T, s *Store, patientID string, at time.Time, reason string) (model.Appointment, error) {
+	t.Helper()
+	return s.ScheduleAppointment(patientID, defaultProfessionalID, defaultServiceID, at, reason)
+}
+
 func TestAddPatientRejectsDuplicateEmail(t *testing.T) {
 	s := newTestStore(t)
 
@@ -113,7 +118,7 @@ func TestDeletePatientRules(t *testing.T) {
 		t.Fatalf("unexpected add error: %v", err)
 	}
 
-	appt, err := s.ScheduleAppointment(p2.ID, futureTime(base, 15), "Control")
+	appt, err := scheduleTestAppointment(t, s, p2.ID, futureTime(base, 15), "Control")
 	if err != nil {
 		t.Fatalf("unexpected schedule error: %v", err)
 	}
@@ -175,22 +180,22 @@ func TestScheduleAppointmentValidationAndConflict(t *testing.T) {
 	p1, _ := s.AddPatient("Paciente 1", "555-5010", "p1@mail.com")
 	p2, _ := s.AddPatient("Paciente 2", "555-5011", "p2@mail.com")
 
-	_, err := s.ScheduleAppointment(p1.ID, time.Now().Add(-1*time.Hour), "Control")
+	_, err := scheduleTestAppointment(t, s, p1.ID, time.Now().Add(-1*time.Hour), "Control")
 	if err == nil || !strings.Contains(err.Error(), "debe ser futura") {
 		t.Fatalf("expected past-date error, got: %v", err)
 	}
 
-	_, err = s.ScheduleAppointment(p1.ID, futureTime(base, 10), "")
+	_, err = scheduleTestAppointment(t, s, p1.ID, futureTime(base, 10), "")
 	if err == nil || !strings.Contains(err.Error(), "motivo") {
 		t.Fatalf("expected reason-required error, got: %v", err)
 	}
 
-	_, err = s.ScheduleAppointment(p1.ID, futureTime(base, 20), "Control")
+	_, err = scheduleTestAppointment(t, s, p1.ID, futureTime(base, 20), "Control")
 	if err != nil {
 		t.Fatalf("unexpected schedule error: %v", err)
 	}
 
-	_, err = s.ScheduleAppointment(p2.ID, futureTime(base, 20), "Consulta")
+	_, err = scheduleTestAppointment(t, s, p2.ID, futureTime(base, 20), "Consulta")
 	if err == nil || !strings.Contains(err.Error(), "ya existe una cita") {
 		t.Fatalf("expected conflict error, got: %v", err)
 	}
@@ -203,11 +208,11 @@ func TestRescheduleAppointment(t *testing.T) {
 	p1, _ := s.AddPatient("Paciente 1", "555-6010", "r1@mail.com")
 	p2, _ := s.AddPatient("Paciente 2", "555-6011", "r2@mail.com")
 
-	a1, err := s.ScheduleAppointment(p1.ID, futureTime(base, 10), "Control")
+	a1, err := scheduleTestAppointment(t, s, p1.ID, futureTime(base, 10), "Control")
 	if err != nil {
 		t.Fatalf("unexpected schedule error: %v", err)
 	}
-	_, err = s.ScheduleAppointment(p2.ID, futureTime(base, 30), "Control")
+	_, err = scheduleTestAppointment(t, s, p2.ID, futureTime(base, 30), "Control")
 	if err != nil {
 		t.Fatalf("unexpected schedule error: %v", err)
 	}
@@ -241,9 +246,9 @@ func TestListAppointmentsWithFilters(t *testing.T) {
 	p1, _ := s.AddPatient("P1", "555-7010", "f1@mail.com")
 	p2, _ := s.AddPatient("P2", "555-7011", "f2@mail.com")
 
-	a1, _ := s.ScheduleAppointment(p1.ID, futureTime(base, 0), "A1")
-	a2, _ := s.ScheduleAppointment(p1.ID, futureTime(base, 20), "A2")
-	a3, _ := s.ScheduleAppointment(p2.ID, futureTime(base, 40), "A3")
+	a1, _ := scheduleTestAppointment(t, s, p1.ID, futureTime(base, 0), "A1")
+	a2, _ := scheduleTestAppointment(t, s, p1.ID, futureTime(base, 20), "A2")
+	a3, _ := scheduleTestAppointment(t, s, p2.ID, futureTime(base, 40), "A3")
 	if err := s.CancelAppointment(a2.ID); err != nil {
 		t.Fatalf("unexpected cancel error: %v", err)
 	}

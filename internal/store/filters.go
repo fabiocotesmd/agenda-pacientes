@@ -7,5 +7,7 @@ type AppointmentFilters struct {
 	From            *time.Time
 	To              *time.Time
 	PatientID       string
+	ProfessionalID  string
+	ServiceID       string
 	Status          string
 }

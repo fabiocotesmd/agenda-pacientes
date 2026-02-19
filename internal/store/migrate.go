@@ -18,8 +18,10 @@ type MigrationOptions struct {
 }
 
 type MigrationResult struct {
-	Patients     int
-	Appointments int
+	Professionals int
+	Services      int
+	Patients      int
+	Appointments  int
 }
 
 func MigrateJSONToSQLite(opts MigrationOptions) (MigrationResult, error) {
@@ -42,6 +44,8 @@ func MigrateJSONToSQLite(opts MigrationOptions) (MigrationResult, error) {
 		return MigrationResult{}, err
 	}
 
+	ensurePhase3BackfillData(&data)
+
 	for _, appt := range data.Appointments {
 		if _, err := validateStatus(appt.Status); err != nil {
 			return MigrationResult{}, fmt.Errorf("estado invalido en cita %q: %w", appt.ID, err)
@@ -56,7 +60,7 @@ func MigrateJSONToSQLite(opts MigrationOptions) (MigrationResult, error) {
 		_ = db.Close()
 	}()
 
-	if err := ensureSQLiteSchema(db); err != nil {
+	if _, err := ensureSQLiteSchema(db); err != nil {
 		return MigrationResult{}, err
 	}
 
@@ -82,6 +86,35 @@ func MigrateJSONToSQLite(opts MigrationOptions) (MigrationResult, error) {
 		_ = tx.Rollback()
 	}()
 
+	for _, professional := range data.Professionals {
+		_, err := tx.Exec(
+			`INSERT OR REPLACE INTO professionals(id, name, name_norm, primary_role, secondary_role, created_at) VALUES(?, ?, ?, ?, ?, ?)`,
+			professional.ID,
+			professional.Name,
+			normalizeNameKey(professional.Name),
+			normalizeRoleOrKind(professional.PrimaryRole),
+			normalizeRoleOrKind(professional.SecondaryRole),
+			formatStoredTime(professional.CreatedAt),
+		)
+		if err != nil {
+			return MigrationResult{}, fmt.Errorf("no se pudo migrar profesional %q: %w", professional.ID, err)
+		}
+	}
+
+	for _, service := range data.Services {
+		_, err := tx.Exec(
+			`INSERT OR REPLACE INTO services(id, name, name_norm, kind, created_at) VALUES(?, ?, ?, ?, ?)`,
+			service.ID,
+			service.Name,
+			normalizeNameKey(service.Name),
+			normalizeRoleOrKind(service.Kind),
+			formatStoredTime(service.CreatedAt),
+		)
+		if err != nil {
+			return MigrationResult{}, fmt.Errorf("no se pudo migrar servicio %q: %w", service.ID, err)
+		}
+	}
+
 	for _, patient := range data.Patients {
 		_, err := tx.Exec(
 			`INSERT INTO patients(id, name, phone, email, email_norm, phone_norm, created_at) VALUES(?, ?, ?, ?, ?, ?, ?)`,
@@ -101,9 +134,12 @@ func MigrateJSONToSQLite(opts MigrationOptions) (MigrationResult, error) {
 	for _, appt := range data.Appointments {
 		normalizedStatus, _ := validateStatus(appt.Status)
 		_, err := tx.Exec(
-			`INSERT INTO appointments(id, patient_id, date_time, reason, status, created_at) VALUES(?, ?, ?, ?, ?, ?)`,
+			`INSERT INTO appointments(id, patient_id, professional_id, service_id, date_time, reason, status, created_at)
+			 VALUES(?, ?, ?, ?, ?, ?, ?, ?)`,
 			appt.ID,
 			appt.PatientID,
+			appt.ProfessionalID,
+			appt.ServiceID,
 			formatAppointmentTime(appt.DateTime),
 			appt.Reason,
 			normalizedStatus,
@@ -119,8 +155,10 @@ func MigrateJSONToSQLite(opts MigrationOptions) (MigrationResult, error) {
 	}
 
 	result := MigrationResult{
-		Patients:     len(data.Patients),
-		Appointments: len(data.Appointments),
+		Professionals: len(data.Professionals),
+		Services:      len(data.Services),
+		Patients:      len(data.Patients),
+		Appointments:  len(data.Appointments),
 	}
 
 	logger := newAuditLogger(toSQLite)
@@ -131,9 +169,11 @@ func MigrateJSONToSQLite(opts MigrationOptions) (MigrationResult, error) {
 		EntityType: "storage",
 		EntityID:   toSQLite,
 		Metadata: map[string]any{
-			"from_json":    fromJSON,
-			"patients":     result.Patients,
-			"appointments": result.Appointments,
+			"from_json":     fromJSON,
+			"professionals": result.Professionals,
+			"services":      result.Services,
+			"patients":      result.Patients,
+			"appointments":  result.Appointments,
 		},
 	}); err != nil {
 		return MigrationResult{}, err
