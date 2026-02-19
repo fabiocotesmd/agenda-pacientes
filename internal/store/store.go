@@ -1,197 +1,231 @@
 package store
 
 import (
-	"encoding/json"
-	"errors"
 	"fmt"
-	"os"
-	"sort"
 	"strings"
-	"sync"
 	"time"
 
 	"agenda-pacientes/internal/model"
 )
 
+type Config struct {
+	Storage         string
+	DataFile        string
+	Actor           string
+	BackupRetention int
+}
+
 type Store struct {
-	path string
-	mu   sync.Mutex
+	cfg     Config
+	backend backend
+	auditor *auditLogger
+	initErr error
 }
 
 func New(path string) *Store {
-	return &Store{path: path}
+	return NewWithConfig(Config{
+		Storage:         "json",
+		DataFile:        path,
+		BackupRetention: 7,
+	})
+}
+
+func NewWithConfig(cfg Config) *Store {
+	normalized := cfg
+	if strings.TrimSpace(normalized.Storage) == "" {
+		normalized.Storage = "json"
+	}
+	normalized.Storage = strings.ToLower(strings.TrimSpace(normalized.Storage))
+	if strings.TrimSpace(normalized.DataFile) == "" {
+		normalized.DataFile = "agenda_data.json"
+	}
+	if normalized.BackupRetention <= 0 {
+		normalized.BackupRetention = 7
+	}
+
+	s := &Store{
+		cfg:     normalized,
+		auditor: newAuditLogger(normalized.DataFile),
+	}
+
+	switch normalized.Storage {
+	case "json":
+		s.backend = newJSONBackend(normalized.DataFile, normalized.BackupRetention)
+	case "sqlite":
+		b, err := newSQLiteBackend(normalized.DataFile)
+		if err != nil {
+			s.initErr = err
+			return s
+		}
+		s.backend = b
+	default:
+		s.initErr = fmt.Errorf("storage invalido %q: usa json o sqlite", normalized.Storage)
+	}
+
+	return s
+}
+
+func (s *Store) InitError() error {
+	return s.initErr
 }
 
 func (s *Store) AddPatient(name, phone, email string) (model.Patient, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	data, err := s.loadUnlocked()
-	if err != nil {
+	if err := s.ensureReady(); err != nil {
 		return model.Patient{}, err
 	}
 
-	patient := model.Patient{
-		ID:        newID("p"),
-		Name:      strings.TrimSpace(name),
-		Phone:     strings.TrimSpace(phone),
-		Email:     strings.TrimSpace(email),
-		CreatedAt: time.Now().UTC(),
+	patient, err := s.backend.AddPatient(name, phone, email)
+	if err != nil {
+		return model.Patient{}, err
 	}
-	data.Patients = append(data.Patients, patient)
-
-	if err := s.saveUnlocked(data); err != nil {
+	if err := s.logEvent("patient.add", "patient", patient.ID, map[string]any{"name": patient.Name}); err != nil {
 		return model.Patient{}, err
 	}
 	return patient, nil
 }
 
 func (s *Store) ListPatients() ([]model.Patient, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	data, err := s.loadUnlocked()
-	if err != nil {
+	if err := s.ensureReady(); err != nil {
 		return nil, err
 	}
+	return s.backend.ListPatients()
+}
 
-	patients := append([]model.Patient(nil), data.Patients...)
-	sort.Slice(patients, func(i, j int) bool {
-		return patients[i].CreatedAt.Before(patients[j].CreatedAt)
-	})
-	return patients, nil
+func (s *Store) GetPatientByID(id string) (model.Patient, error) {
+	if err := s.ensureReady(); err != nil {
+		return model.Patient{}, err
+	}
+	return s.backend.GetPatientByID(id)
+}
+
+func (s *Store) UpdatePatient(id, name, phone, email string) (model.Patient, error) {
+	if err := s.ensureReady(); err != nil {
+		return model.Patient{}, err
+	}
+
+	patient, err := s.backend.UpdatePatient(id, name, phone, email)
+	if err != nil {
+		return model.Patient{}, err
+	}
+	if err := s.logEvent("patient.update", "patient", patient.ID, nil); err != nil {
+		return model.Patient{}, err
+	}
+	return patient, nil
+}
+
+func (s *Store) DeletePatient(id string) error {
+	if err := s.ensureReady(); err != nil {
+		return err
+	}
+	if err := s.backend.DeletePatient(id); err != nil {
+		return err
+	}
+	if err := s.logEvent("patient.delete", "patient", strings.TrimSpace(id), nil); err != nil {
+		return err
+	}
+	return nil
+}
+
+func (s *Store) SearchPatients(query string) ([]model.Patient, error) {
+	if err := s.ensureReady(); err != nil {
+		return nil, err
+	}
+	return s.backend.SearchPatients(query)
 }
 
 func (s *Store) ScheduleAppointment(patientID string, at time.Time, reason string) (model.Appointment, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	data, err := s.loadUnlocked()
-	if err != nil {
+	if err := s.ensureReady(); err != nil {
 		return model.Appointment{}, err
 	}
 
-	trimmedPatientID := strings.TrimSpace(patientID)
-	if !existsPatient(data.Patients, trimmedPatientID) {
-		return model.Appointment{}, fmt.Errorf("no existe el paciente con id %q", trimmedPatientID)
+	appointment, err := s.backend.ScheduleAppointment(patientID, at, reason)
+	if err != nil {
+		return model.Appointment{}, err
 	}
-
-	normalized := at.UTC().Truncate(time.Minute)
-	for _, appt := range data.Appointments {
-		if appt.Status == model.AppointmentStatusCanceled {
-			continue
-		}
-		if appt.DateTime.UTC().Truncate(time.Minute).Equal(normalized) {
-			return model.Appointment{}, errors.New("ya existe una cita en ese horario")
-		}
-	}
-
-	appointment := model.Appointment{
-		ID:        newID("a"),
-		PatientID: trimmedPatientID,
-		DateTime:  normalized,
-		Reason:    strings.TrimSpace(reason),
-		Status:    model.AppointmentStatusScheduled,
-		CreatedAt: time.Now().UTC(),
-	}
-	data.Appointments = append(data.Appointments, appointment)
-
-	if err := s.saveUnlocked(data); err != nil {
+	if err := s.logEvent("appointment.add", "appointment", appointment.ID, map[string]any{"patient_id": appointment.PatientID}); err != nil {
 		return model.Appointment{}, err
 	}
 	return appointment, nil
 }
 
-func (s *Store) ListAppointments(includeCanceled bool) ([]model.Appointment, error) {
-	s.mu.Lock()
-	defer s.mu.Unlock()
+func (s *Store) RescheduleAppointment(id string, at time.Time) (model.Appointment, error) {
+	if err := s.ensureReady(); err != nil {
+		return model.Appointment{}, err
+	}
 
-	data, err := s.loadUnlocked()
+	appointment, err := s.backend.RescheduleAppointment(id, at)
 	if err != nil {
+		return model.Appointment{}, err
+	}
+	if err := s.logEvent("appointment.reschedule", "appointment", appointment.ID, map[string]any{"new_date_time": appointment.DateTime.Format(time.RFC3339)}); err != nil {
+		return model.Appointment{}, err
+	}
+	return appointment, nil
+}
+
+func (s *Store) ListAppointments(filters AppointmentFilters) ([]model.Appointment, error) {
+	if err := s.ensureReady(); err != nil {
 		return nil, err
 	}
-
-	filtered := make([]model.Appointment, 0, len(data.Appointments))
-	for _, appt := range data.Appointments {
-		if !includeCanceled && appt.Status == model.AppointmentStatusCanceled {
-			continue
-		}
-		filtered = append(filtered, appt)
-	}
-
-	sort.Slice(filtered, func(i, j int) bool {
-		return filtered[i].DateTime.Before(filtered[j].DateTime)
-	})
-
-	return filtered, nil
+	return s.backend.ListAppointments(filters)
 }
 
 func (s *Store) CancelAppointment(appointmentID string) error {
-	s.mu.Lock()
-	defer s.mu.Unlock()
-
-	data, err := s.loadUnlocked()
-	if err != nil {
+	if err := s.ensureReady(); err != nil {
 		return err
 	}
 
-	target := strings.TrimSpace(appointmentID)
-	for i := range data.Appointments {
-		if data.Appointments[i].ID != target {
-			continue
-		}
-		if data.Appointments[i].Status == model.AppointmentStatusCanceled {
-			return fmt.Errorf("la cita %q ya estaba cancelada", target)
-		}
-		data.Appointments[i].Status = model.AppointmentStatusCanceled
-		return s.saveUnlocked(data)
-	}
-
-	return fmt.Errorf("no se encontro la cita con id %q", target)
-}
-
-func existsPatient(patients []model.Patient, id string) bool {
-	for _, p := range patients {
-		if p.ID == id {
-			return true
-		}
-	}
-	return false
-}
-
-func (s *Store) loadUnlocked() (model.Data, error) {
-	bytes, err := os.ReadFile(s.path)
+	appointment, err := s.backend.SetAppointmentStatus(appointmentID, model.AppointmentStatusCanceled)
 	if err != nil {
-		if errors.Is(err, os.ErrNotExist) {
-			return model.Data{}, nil
+		if err == errNoStatusChange {
+			return nil
 		}
-		return model.Data{}, fmt.Errorf("no se pudo leer %s: %w", s.path, err)
+		return err
 	}
-
-	if len(strings.TrimSpace(string(bytes))) == 0 {
-		return model.Data{}, nil
+	if err := s.logEvent("appointment.cancel", "appointment", appointment.ID, nil); err != nil {
+		return err
 	}
-
-	var data model.Data
-	if err := json.Unmarshal(bytes, &data); err != nil {
-		return model.Data{}, fmt.Errorf("JSON invalido en %s: %w", s.path, err)
-	}
-	return data, nil
-}
-
-func (s *Store) saveUnlocked(data model.Data) error {
-	bytes, err := json.MarshalIndent(data, "", "  ")
-	if err != nil {
-		return fmt.Errorf("no se pudo serializar datos: %w", err)
-	}
-
-	if err := os.WriteFile(s.path, bytes, 0o644); err != nil {
-		return fmt.Errorf("no se pudo guardar %s: %w", s.path, err)
-	}
-
 	return nil
 }
 
-func newID(prefix string) string {
-	return fmt.Sprintf("%s_%x", prefix, time.Now().UTC().UnixNano())
+func (s *Store) SetAppointmentStatus(id, status string) (model.Appointment, error) {
+	if err := s.ensureReady(); err != nil {
+		return model.Appointment{}, err
+	}
+
+	appointment, err := s.backend.SetAppointmentStatus(id, status)
+	if err != nil {
+		if err == errNoStatusChange {
+			return appointment, nil
+		}
+		return model.Appointment{}, err
+	}
+	if err := s.logEvent("appointment.set_status", "appointment", appointment.ID, map[string]any{"status": appointment.Status}); err != nil {
+		return model.Appointment{}, err
+	}
+	return appointment, nil
+}
+
+func (s *Store) ensureReady() error {
+	if s.initErr != nil {
+		return s.initErr
+	}
+	if s.backend == nil {
+		return fmt.Errorf("store no inicializado")
+	}
+	return nil
+}
+
+func (s *Store) logEvent(action, entityType, entityID string, metadata map[string]any) error {
+	if s.auditor == nil {
+		return nil
+	}
+	return s.auditor.Log(auditEvent{
+		Actor:      s.cfg.Actor,
+		Backend:    s.cfg.Storage,
+		Action:     action,
+		EntityType: entityType,
+		EntityID:   entityID,
+		Metadata:   metadata,
+	})
 }

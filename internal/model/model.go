@@ -4,6 +4,9 @@ import "time"
 
 const (
 	AppointmentStatusScheduled = "programada"
+	AppointmentStatusConfirmed = "confirmada"
+	AppointmentStatusAttended  = "atendida"
+	AppointmentStatusNoShow    = "ausente"
 	AppointmentStatusCanceled  = "cancelada"
 )
 
